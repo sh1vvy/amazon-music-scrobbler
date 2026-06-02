@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="app">
+
+    <!-- Loading -->
+    <div id="screen-loading" class="screen">
+      <div class="loading-spinner"></div>
+    </div>
+
+    <!-- Setup: enter API credentials -->
+    <div id="screen-setup" class="screen hidden">
+      <div class="header">
+        <svg class="logo-icon" viewBox="0 0 40 40" fill="none">
+          <circle cx="20" cy="20" r="20" fill="#D51007"/>
+          <path d="M27 12v12.5c0 .8-.4 1.5-1 2l-3 1.5c-1.7.9-3.5-.3-3.5-2.3 0-1.4.9-2.6 2.2-3.1l2.3-.9V14.5L16 16v12.5c0 .8-.4 1.5-1 2l-3 1.5c-1.7.9-3.5-.3-3.5-2.3 0-1.4.9-2.6 2.2-3.1l2.3-.9V13a1 1 0 0 1 .7-1l12-3.5a1 1 0 0 1 1.3 1z" fill="white"/>
+        </svg>
+        <div>
+          <h1>Amazon Music<br>Scrobbler</h1>
+        </div>
+      </div>
+
+      <div class="content">
+        <p class="hint">
+          Get your free API credentials at
+          <a href="https://www.last.fm/api/account/create" target="_blank">last.fm/api/account/create</a>
+        </p>
+        <div class="field">
+          <label for="api-key">API Key</label>
+          <input type="text" id="api-key" placeholder="32-character API key" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="api-secret">API Secret</label>
+          <input type="password" id="api-secret" placeholder="API secret" autocomplete="off">
+        </div>
+        <div id="setup-error" class="error hidden"></div>
+        <button id="btn-save-credentials" class="btn primary">Save &amp; Continue</button>
+      </div>
+    </div>
+
+    <!-- Auth: connect Last.fm account -->
+    <div id="screen-auth" class="screen hidden">
+      <div class="header">
+        <svg class="logo-icon" viewBox="0 0 40 40" fill="none">
+          <circle cx="20" cy="20" r="20" fill="#D51007"/>
+          <path d="M27 12v12.5c0 .8-.4 1.5-1 2l-3 1.5c-1.7.9-3.5-.3-3.5-2.3 0-1.4.9-2.6 2.2-3.1l2.3-.9V14.5L16 16v12.5c0 .8-.4 1.5-1 2l-3 1.5c-1.7.9-3.5-.3-3.5-2.3 0-1.4.9-2.6 2.2-3.1l2.3-.9V13a1 1 0 0 1 .7-1l12-3.5a1 1 0 0 1 1.3 1z" fill="white"/>
+        </svg>
+        <div>
+          <h1>Connect Last.fm</h1>
+        </div>
+      </div>
+
+      <div class="content">
+        <p class="hint">Authorize this extension to scrobble to your Last.fm account.</p>
+        <div id="auth-error" class="error hidden"></div>
+        <button id="btn-connect" class="btn primary">Connect to Last.fm</button>
+        <button id="btn-reset-creds" class="btn ghost">Change API credentials</button>
+      </div>
+    </div>
+
+    <!-- Connected -->
+    <div id="screen-connected" class="screen hidden">
+      <div class="header compact">
+        <svg class="logo-icon small" viewBox="0 0 40 40" fill="none">
+          <circle cx="20" cy="20" r="20" fill="#D51007"/>
+          <path d="M27 12v12.5c0 .8-.4 1.5-1 2l-3 1.5c-1.7.9-3.5-.3-3.5-2.3 0-1.4.9-2.6 2.2-3.1l2.3-.9V14.5L16 16v12.5c0 .8-.4 1.5-1 2l-3 1.5c-1.7.9-3.5-.3-3.5-2.3 0-1.4.9-2.6 2.2-3.1l2.3-.9V13a1 1 0 0 1 .7-1l12-3.5a1 1 0 0 1 1.3 1z" fill="white"/>
+        </svg>
+        <div class="header-text">
+          <h1>Amazon Music Scrobbler</h1>
+          <span class="badge connected">Connected</span>
+        </div>
+      </div>
+
+      <div class="content">
+        <div class="username" id="username-display"></div>
+
+        <div class="track-card" id="now-playing-card">
+          <div class="card-label">
+            <span class="dot playing"></span>
+            Now Playing
+          </div>
+          <div id="now-playing-content" class="track-info">
+            <span class="track-empty">Nothing playing</span>
+          </div>
+        </div>
+
+        <div class="track-card" id="last-scrobble-card">
+          <div class="card-label">Last Scrobbled</div>
+          <div id="last-scrobble-content" class="track-info">
+            <span class="track-empty">Nothing scrobbled yet</span>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="btn-disconnect" class="btn ghost small">Disconnect</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
