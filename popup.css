@@ -538,6 +538,45 @@ button {
   flex-shrink: 0;
 }
 
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.history-track-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.btn-rescrobble {
+  background: none;
+  border: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-ghost);
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: color 0.15s, background 0.15s, opacity 0.15s, transform 0.3s;
+}
+
+.history-item:hover .btn-rescrobble { opacity: 1; }
+
+.btn-rescrobble:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.btn-rescrobble.busy svg { animation: spin 0.7s linear infinite; }
+.btn-rescrobble.done    { color: var(--success); opacity: 1; }
+.btn-rescrobble.failed  { color: var(--danger);  opacity: 1; }
+.btn-rescrobble:disabled { cursor: default; }
+
 .queue-badge {
   font-size: 10px;
   font-weight: 600;
@@ -631,6 +670,47 @@ button {
   transform: translateX(16px);
 }
 
+/* Range slider */
+.slider-label {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.slider-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.range {
+  -webkit-appearance: none;
+  width: 100%;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  outline: none;
+}
+
+.range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  background: var(--accent);
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid var(--bg-elev);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  transition: transform 0.1s;
+}
+
+.range::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+
 /* Segmented control (theme) */
 .seg-control {
   display: flex;
@@ -661,6 +741,20 @@ button {
   background: var(--bg-elev);
   color: var(--text);
   box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+}
+
+.kbd {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  vertical-align: 1px;
 }
 
 /* Link row */

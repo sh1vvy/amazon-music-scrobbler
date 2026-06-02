@@ -90,6 +90,9 @@ function syncSettingsUI(settings) {
   currentSettings = settings;
   $('toggle-scrobble').checked      = settings.scrobblingEnabled;
   $('toggle-notifications').checked = settings.notificationsEnabled;
+  const pct = settings.scrobbleThresholdPercent ?? 50;
+  $('threshold-slider').value       = pct;
+  $('threshold-value').textContent  = `${pct}%`;
   applyTheme(settings.theme);
 }
 
@@ -158,13 +161,45 @@ async function refreshConnectedScreen(status) {
   } else {
     historyList.innerHTML = history.map((entry, i) => `
       <div class="history-item${i < history.length - 1 ? ' bordered' : ''}">
-        <div class="history-track">
-          <span class="track-title">${escHtml(entry.track.title)}</span>
-          <span class="history-time">${timeAgo(entry.at)}</span>
+        <div class="history-row">
+          <div class="history-track-info">
+            <div class="history-track">
+              <span class="track-title">${escHtml(entry.track.title)}</span>
+              <span class="history-time">${timeAgo(entry.at)}</span>
+            </div>
+            <div class="track-artist">${escHtml(entry.track.artist)}</div>
+          </div>
+          <button class="btn-rescrobble" data-idx="${i}" title="Re-scrobble" aria-label="Re-scrobble">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/>
+              <path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/>
+            </svg>
+          </button>
         </div>
-        <div class="track-artist">${escHtml(entry.track.artist)}</div>
       </div>
     `).join('');
+
+    // Wire up re-scrobble buttons
+    historyList.querySelectorAll('.btn-rescrobble').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const idx = Number(btn.dataset.idx);
+        const entry = history[idx];
+        if (!entry) return;
+        btn.disabled = true;
+        btn.classList.add('busy');
+        const res = await send('RE_SCROBBLE', { track: entry.track });
+        btn.classList.remove('busy');
+        if (res?.ok) {
+          btn.classList.add('done');
+          setTimeout(() => btn.classList.remove('done'), 1200);
+        } else {
+          btn.classList.add('failed');
+          btn.title = res?.error || 'Failed';
+          setTimeout(() => btn.classList.remove('failed'), 1800);
+        }
+        btn.disabled = false;
+      });
+    });
   }
 
   // Last.fm profile link
@@ -192,6 +227,20 @@ function startPolling() {
   }, 4000);
 }
 
+async function showShortcutHint() {
+  try {
+    const commands = await chrome.commands.getAll();
+    const cmd = commands.find(c => c.name === 'toggle-scrobbling');
+    const kbd = $('kbd-toggle');
+    if (cmd?.shortcut) {
+      kbd.textContent = cmd.shortcut;
+      kbd.classList.remove('hidden');
+    } else {
+      kbd.classList.add('hidden');
+    }
+  } catch (_) {}
+}
+
 async function init() {
   showScreen('loading');
 
@@ -217,6 +266,7 @@ async function init() {
 
   showScreen('connected');
   await refreshConnectedScreen(status);
+  showShortcutHint();
   startPolling();
 }
 
@@ -322,6 +372,18 @@ $('toggle-notifications').addEventListener('change', async (e) => {
   const enabled = e.target.checked;
   const res = await send('UPDATE_SETTINGS', { settings: { notificationsEnabled: enabled } });
   if (res?.ok) currentSettings = res.settings;
+});
+
+let thresholdSaveTimer = null;
+$('threshold-slider').addEventListener('input', (e) => {
+  const pct = Number(e.target.value);
+  $('threshold-value').textContent = `${pct}%`;
+  // Debounce writes so we don't hammer storage during drag
+  clearTimeout(thresholdSaveTimer);
+  thresholdSaveTimer = setTimeout(async () => {
+    const res = await send('UPDATE_SETTINGS', { settings: { scrobbleThresholdPercent: pct } });
+    if (res?.ok) currentSettings = res.settings;
+  }, 250);
 });
 
 document.querySelectorAll('#theme-seg .seg-btn').forEach(btn => {

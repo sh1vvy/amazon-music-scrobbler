@@ -41,6 +41,15 @@
       "run_at": "document_idle"
     }
   ],
+  "commands": {
+    "toggle-scrobbling": {
+      "suggested_key": {
+        "default":  "Alt+Shift+S",
+        "mac":      "Alt+Shift+S"
+      },
+      "description": "Toggle scrobbling on/off"
+    }
+  },
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
