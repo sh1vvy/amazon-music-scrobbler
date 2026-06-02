@@ -167,13 +167,26 @@ async function readAmazonTab() {
     const [res] = await chrome.scripting.executeScript({
       target: { tabId: tabs[0].id },
       func: () => {
-        const meta = navigator.mediaSession?.metadata;
+        // Amazon Music new player: track info lives in DOM attributes, not mediaSession.
+        // This matches the approach used by web-scrobbler for Amazon Music.
         const audio = document.querySelector('audio');
-        if (!meta?.title || !meta?.artist) return null;
+        const item  = document.querySelector('#transport music-horizontal-item');
+        let title, artist;
+        if (item) {
+          title  = item.getAttribute('primary-text');
+          artist = item.getAttribute('secondary-text');
+        }
+        // Fallback to MediaSession if DOM approach yields nothing
+        if (!title || !artist) {
+          const meta = navigator.mediaSession?.metadata;
+          title  = meta?.title;
+          artist = meta?.artist;
+        }
+        if (!title || !artist) return null;
         return {
-          title: meta.title,
-          artist: meta.artist,
-          album: meta.album || '',
+          title,
+          artist,
+          album: '',
           duration: audio?.duration || 0,
           currentTime: audio?.currentTime || 0,
           isPlaying: audio ? !audio.paused : false,
@@ -216,7 +229,7 @@ async function onNewTrack(track) {
   const delaySec = track.duration > 30
     ? Math.min(track.duration * 0.5, 240)
     : 60; // fallback: check after 60s if duration wasn't loaded yet
-  chrome.alarms.create('scrobble_pending', { delayInSeconds: delaySec });
+  chrome.alarms.create('scrobble_pending', { delayInMinutes: delaySec / 60 });
 }
 
 async function tryScrobbleNow() {
@@ -228,16 +241,26 @@ async function tryScrobbleNow() {
 
   const live = await readAmazonTab();
 
-  // If a *different* track is actively playing right now, don't scrobble the stored one
-  if (live?.isPlaying &&
-      (live.title !== state.currentTrack.title || live.artist !== state.currentTrack.artist)) {
-    return;
+  const elapsed   = Math.floor(Date.now() / 1000) - (state.currentTrackAt || 0);
+  const storedDur = state.currentTrack.duration || 0;
+
+  // Is a DIFFERENT track actively playing right now?
+  const differentTrack = live?.isPlaying &&
+    (live.title !== state.currentTrack.title || live.artist !== state.currentTrack.artist);
+
+  if (differentTrack) {
+    // A different track is playing — this happens when a song auto-transitions
+    // or when the skip wasn't detected until the next popup open.
+    // We still want to scrobble the stored track if it played long enough.
+    // BUT: if elapsed is far larger than the stored duration the song was
+    // probably paused for a long time before being skipped — skip the scrobble.
+    if (storedDur > 0 && elapsed > storedDur * 1.5) return;
   }
 
-  // Best estimates: prefer live values, fall back to stored/elapsed
-  const duration = (live?.duration > 0 ? live.duration : 0) || state.currentTrack.duration || 0;
-  const elapsed  = Math.floor(Date.now() / 1000) - (state.currentTrackAt || 0);
-  const position = (live?.currentTime > 0 ? live.currentTime : 0) || elapsed;
+  // When a different track is now playing, live.currentTime belongs to that
+  // other track — use elapsed wall-clock time as the position proxy instead.
+  const duration = (!differentTrack && live?.duration > 0 ? live.duration : 0) || storedDur;
+  const position = (!differentTrack && live?.currentTime > 0 ? live.currentTime : 0) || elapsed;
 
   // Last.fm rule: track must be longer than 30 seconds
   if (duration > 0 && duration < 30) return;
@@ -245,9 +268,12 @@ async function tryScrobbleNow() {
   // Must have played to the scrobble threshold (50% or 4 min); 2 min if duration unknown
   const threshold = duration > 30 ? Math.min(duration * 0.5, 240) : 120;
   if (position < threshold && elapsed < threshold) {
-    // Too early — reschedule for when we should actually hit the threshold
-    const remaining = Math.max(threshold - Math.max(position, elapsed), 30);
-    chrome.alarms.create('scrobble_pending', { delayInSeconds: remaining });
+    if (!differentTrack) {
+      // Still on the same track and too early — reschedule the alarm.
+      const remaining = Math.max(threshold - Math.max(position, elapsed), 30);
+      chrome.alarms.create('scrobble_pending', { delayInMinutes: remaining / 60 });
+    }
+    // If a different track is already playing we can't reschedule — just drop.
     return;
   }
 
@@ -310,7 +336,7 @@ async function syncTabState() {
     const elapsed = Math.floor(Date.now() / 1000) - (state.currentTrackAt || 0);
     const remaining = Math.min(live.duration * 0.5, 240) - elapsed;
     if (remaining > 5) {
-      chrome.alarms.create('scrobble_pending', { delayInSeconds: remaining });
+      chrome.alarms.create('scrobble_pending', { delayInMinutes: remaining / 60 });
     } else if (!state.currentScrobbled) {
       await tryScrobbleNow();
     }
@@ -324,10 +350,30 @@ async function syncTabState() {
   }
 }
 
+// ── Keep-alive port (from content script) ────────────────────────────────────
+// Each time the content script (re)connects we also sync tab state.
+// This fires on page load AND every time the service worker restarts and the
+// content script reconnects — giving us a sync on every worker wake.
+
+let lastKeepaliveSyncTs = 0;
+
+chrome.runtime.onConnect.addListener(port => {
+  if (port.name !== 'keepalive') return;
+  port.onDisconnect.addListener(() => {});
+
+  // Throttle: don't sync more than once per 8 s (reconnects can be rapid)
+  const now = Date.now();
+  if (now - lastKeepaliveSyncTs > 8000) {
+    lastKeepaliveSyncTs = now;
+    syncTabState().catch(() => {});
+  }
+});
+
 // ── Alarms ────────────────────────────────────────────────────────────────────
 
 chrome.alarms.onAlarm.addListener(async alarm => {
   if (alarm.name === 'scrobble_pending') await tryScrobbleNow();
+  if (alarm.name === 'track_poll')       await syncTabState();
 });
 
 // ── Tab events → sync state ───────────────────────────────────────────────────
@@ -360,10 +406,28 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const handle = async () => {
     switch (msg.type) {
 
-      // Content script signals a play event — sync immediately
-      case 'NOW_PLAYING':
-        await syncTabState();
+      // Content script detected a new track — use its data directly (faster + more reliable)
+      case 'NOW_PLAYING': {
+        const track = msg.track;
+        if (track?.title && track?.artist) {
+          const state = await getLocalState();
+          const isNew = !state.currentTrack ||
+            state.currentTrack.title !== track.title ||
+            state.currentTrack.artist !== track.artist;
+          if (isNew) {
+            if (state.currentTrack && !state.currentScrobbled) {
+              const elapsed = Math.floor(Date.now() / 1000) - (state.currentTrackAt || 0);
+              const dur = state.currentTrack.duration || 0;
+              const threshold = dur > 30 ? Math.min(dur * 0.5, 240) : 120;
+              if (elapsed >= threshold) await tryScrobbleNow();
+            }
+            await onNewTrack(track);
+          }
+        } else {
+          await syncTabState();
+        }
         return { ok: true };
+      }
 
       // Content script signals scrobble threshold met
       case 'SCROBBLE': {
@@ -372,6 +436,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         await tryScrobbleNow();
         return { ok: true };
       }
+
+      case 'REQUEST_SYNC':
+        await syncTabState();
+        return { ok: true };
 
       case 'START_AUTH': {
         try {
@@ -423,7 +491,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
               const elapsed = Math.floor(Date.now() / 1000) - (state.currentTrackAt || 0);
               const remaining = Math.min(liveTrack.duration * 0.5, 240) - elapsed;
               if (remaining > 5) {
-                chrome.alarms.create('scrobble_pending', { delayInSeconds: remaining });
+                chrome.alarms.create('scrobble_pending', { delayInMinutes: remaining / 60 });
               } else if (!state.currentScrobbled) {
                 await tryScrobbleNow();
               }
@@ -479,5 +547,32 @@ async function injectIntoExistingTabs() {
   }
 }
 
+// On every service worker startup, recover any scrobble that was missed while asleep
+async function recoverMissedScrobble() {
+  const state = await getLocalState();
+  if (!state.currentTrack || state.currentScrobbled || !state.currentTrackAt) return;
+  const elapsed = Math.floor(Date.now() / 1000) - state.currentTrackAt;
+  const dur = state.currentTrack.duration || 0;
+  const threshold = dur > 30 ? Math.min(dur * 0.5, 240) : 120;
+  if (elapsed >= threshold) {
+    await tryScrobbleNow();
+  } else {
+    // Alarm may have been cleared when worker was terminated — reschedule
+    const remaining = Math.max(threshold - elapsed, 30);
+    chrome.alarms.create('scrobble_pending', { delayInMinutes: remaining / 60 });
+  }
+}
+
 chrome.runtime.onInstalled.addListener(injectIntoExistingTabs);
 injectIntoExistingTabs();
+recoverMissedScrobble();
+
+// Sync current tab state on every service worker startup.
+// This catches the case where the worker was killed mid-song.
+syncTabState().catch(() => {});
+
+// Repeating alarm: re-sync every 30 s (Chrome's minimum alarm period).
+// This ensures track detection catches up even if all other mechanisms fail.
+chrome.alarms.get('track_poll', alarm => {
+  if (!alarm) chrome.alarms.create('track_poll', { periodInMinutes: 0.5 });
+});

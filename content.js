@@ -1,159 +1,379 @@
-// content.js — runs on Amazon Music pages
+// content.js — runs inside the Amazon Music tab
+// Handles ALL scrobbling: detection, timing, and Last.fm API calls.
+// No dependency on the background service worker staying alive.
 
 (function () {
-  // Guard against duplicate execution.
-  // Uses a liveness-check function so we can detect when a previous instance became
-  // orphaned (extension was reloaded) — chrome.runtime.id throws on orphaned contexts.
+  // Guard: skip if a live instance is already running.
+  // Uses a function so we can detect orphaned instances (extension reloaded).
   if (window.__amScrobblerAlive) {
-    try {
-      if (window.__amScrobblerAlive()) return; // live instance already running, skip
-    } catch (_) {
-      // Previous instance's extension context is invalidated → fall through and reinitialize
-    }
+    try { if (window.__amScrobblerAlive()) return; } catch (_) {}
   }
   window.__amScrobblerAlive = () => {
     try { return !!chrome.runtime.id; } catch (_) { return false; }
   };
 
-  let currentTrack = null;
-  let audioEl = null;
-  let scrobbled = false;
-  let nowPlayingReported = false;
-  let trackStartTimestamp = null;
+  const LASTFM_API = 'https://ws.audioscrobbler.com/2.0/';
+
+  // ── MD5 ──────────────────────────────────────────────────────────────────────
+
+  function md5(input) {
+    const bytes = Array.from(new TextEncoder().encode(input));
+    let a = 0x67452301, b = 0xEFCDAB89, c = 0x98BADCFE, d = 0x10325476;
+    const S = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
+    const K = Array.from({length:64},(_,i)=>(Math.abs(Math.sin(i+1))*0x100000000)>>>0);
+    const bitLen = bytes.length * 8;
+    const padded = [...bytes, 0x80];
+    while (padded.length % 64 !== 56) padded.push(0);
+    for (let i=0;i<4;i++) padded.push((bitLen>>>(i*8))&0xff);
+    for (let i=0;i<4;i++) padded.push(0);
+    const add=(x,y)=>(x+y)>>>0, rol=(v,n)=>((v<<n)|(v>>>(32-n)))>>>0;
+    for (let i=0;i<padded.length;i+=64){
+      const M=Array.from({length:16},(_,j)=>((padded[i+j*4+3]<<24)|(padded[i+j*4+2]<<16)|(padded[i+j*4+1]<<8)|padded[i+j*4])>>>0);
+      let A=a,B=b,C=c,D=d;
+      for(let j=0;j<64;j++){
+        let F,g;
+        if(j<16){F=((B&C)|(~B&D))>>>0;g=j;}
+        else if(j<32){F=((D&B)|(~D&C))>>>0;g=(5*j+1)%16;}
+        else if(j<48){F=(B^C^D)>>>0;g=(3*j+5)%16;}
+        else{F=(C^(B|~D))>>>0;g=(7*j)%16;}
+        const T=D;D=C;C=B;B=add(B,rol(add(add(A,F),add(K[j],M[g])),S[j]));A=T;
+      }
+      a=add(a,A);b=add(b,B);c=add(c,C);d=add(d,D);
+    }
+    return [a,b,c,d].map(n=>Array.from({length:4},(_,i)=>((n>>>(i*8))&0xff).toString(16).padStart(2,'0')).join('')).join('');
+  }
+
+  // ── Last.fm API ───────────────────────────────────────────────────────────────
+
+  function makeSignature(params, secret) {
+    return md5(
+      Object.keys(params).filter(k=>k!=='format'&&k!=='callback').sort()
+        .map(k=>`${k}${params[k]??''}`).join('') + secret
+    );
+  }
+
+  async function getCreds() {
+    return new Promise(r => chrome.storage.sync.get(['apiKey','apiSecret','sessionKey'], r));
+  }
+
+  async function lastfmPost(method, extra = {}) {
+    const { apiKey, apiSecret, sessionKey } = await getCreds();
+    if (!apiKey || !apiSecret || !sessionKey) return null;
+    const p = { method, api_key: apiKey, ...extra, format: 'json', sk: sessionKey };
+    p.api_sig = makeSignature(p, apiSecret);
+    try {
+      const res = await fetch(LASTFM_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(p),
+      });
+      return res.json();
+    } catch (_) { return null; }
+  }
+
+  function sendNowPlaying(track) {
+    const p = { artist: track.artist, track: track.title };
+    if (track.album) p.album = track.album;
+    lastfmPost('track.updateNowPlaying', p).catch(() => {});
+  }
+
+  async function sendScrobble(track) {
+    const p = {
+      'artist[0]': track.artist,
+      'track[0]':  track.title,
+      'timestamp[0]': String(track.timestamp || Math.floor(Date.now() / 1000)),
+    };
+    if (track.album)    p['album[0]']    = track.album;
+    if (track.duration) p['duration[0]'] = String(Math.floor(track.duration));
+    return lastfmPost('track.scrobble', p);
+  }
+
+  // ── Track state ───────────────────────────────────────────────────────────────
+
+  let currentTrack    = null;
+  let audioEl         = null;
+  let scrobbled       = false;
+  let trackStartTs    = null;   // unix seconds when current track started
+  let scrobbleTimer   = null;
 
   function getMetadata() {
-    const meta = navigator.mediaSession?.metadata;
-    if (meta?.title && meta?.artist) {
-      return {
-        title: meta.title,
-        artist: meta.artist,
-        album: meta.album || '',
-        duration: audioEl?.duration || 0,
-      };
-    }
-    return scrapeFromDOM();
-  }
-
-  function scrapeFromDOM() {
-    const titleSelectors = [
-      '[data-testid="track-title"]', '[class*="trackTitle"]',
-      '[class*="track-title"]', '[class*="TrackTitle"]',
-    ];
-    const artistSelectors = [
-      '[data-testid="track-artist"]', '[class*="artistName"]',
-      '[class*="artist-name"]', '[class*="ArtistName"]',
-    ];
-    let title = null, artist = null;
-    for (const sel of titleSelectors) {
-      const el = document.querySelector(sel);
-      if (el?.textContent?.trim()) { title = el.textContent.trim(); break; }
-    }
-    for (const sel of artistSelectors) {
-      const el = document.querySelector(sel);
-      if (el?.textContent?.trim()) { artist = el.textContent.trim(); break; }
-    }
-    if (!title || !artist) return null;
-    return { title, artist, album: '', duration: audioEl?.duration || 0 };
-  }
-
-  function isSameTrack(a, b) {
-    if (!a || !b) return false;
-    return a.title === b.title && a.artist === b.artist;
-  }
-
-  function onNewTrack(track) {
-    currentTrack = { ...track };
-    scrobbled = false;
-    nowPlayingReported = false;
-    trackStartTimestamp = Math.floor(Date.now() / 1000);
-    reportNowPlaying(track);
-  }
-
-  function reportNowPlaying(track) {
-    nowPlayingReported = true;
-    chrome.runtime.sendMessage({ type: 'NOW_PLAYING', track }).catch(() => {});
-  }
-
-  function checkScrobbleThreshold() {
-    if (scrobbled || !currentTrack || !audioEl) return;
-    const duration = audioEl.duration;
-    const position = audioEl.currentTime;
-    if (!duration || !isFinite(duration) || duration < 30) return;
-    const threshold = Math.min(duration * 0.5, 240);
-    if (position >= threshold) {
-      scrobbled = true;
-      chrome.runtime.sendMessage({
-        type: 'SCROBBLE',
-        track: { ...currentTrack, timestamp: trackStartTimestamp },
-      }).catch(() => {});
-    }
-  }
-
-  function attachAudioListeners(audio) {
-    audio.addEventListener('play', () => {
-      const track = getMetadata();
-      if (!track) return;
-      if (!isSameTrack(track, currentTrack)) {
-        onNewTrack(track);
-      } else if (!nowPlayingReported) {
-        reportNowPlaying(track);
+    // Amazon Music's new player renders track info as attributes on a custom
+    // element inside the transport bar — this is the same approach used by
+    // web-scrobbler and is far more reliable than navigator.mediaSession, which
+    // content scripts in an isolated world cannot always observe reliably.
+    const item = document.querySelector('#transport music-horizontal-item');
+    if (item) {
+      const title  = item.getAttribute('primary-text');
+      const artist = item.getAttribute('secondary-text');
+      if (title && artist) {
+        return { title, artist, album: '', duration: audioEl?.duration || 0 };
       }
+    }
+    // Fallback: MediaSession API (covers edge cases / other Amazon Music layouts)
+    const m = navigator.mediaSession?.metadata;
+    if (m?.title && m?.artist) {
+      return { title: m.title, artist: m.artist, album: m.album || '', duration: audioEl?.duration || 0 };
+    }
+    return null;
+  }
+
+  function same(a, b) { return a && b && a.title === b.title && a.artist === b.artist; }
+
+  function clearTimer() {
+    if (scrobbleTimer) { clearTimeout(scrobbleTimer); scrobbleTimer = null; }
+  }
+
+  function startTrack(track) {
+    // Before overwriting state, scrobble the previous track if it reached the
+    // threshold but the timeupdate/timer hadn't fired yet (happens on skips,
+    // especially when the tab was in the background and timers were throttled).
+    if (currentTrack && !scrobbled && trackStartTs) {
+      const elapsed = Math.floor(Date.now() / 1000) - trackStartTs;
+      const dur = currentTrack.duration || 0;
+      const threshold = dur > 30 ? Math.min(dur * 0.5, 240) : 120;
+      if (elapsed >= threshold) {
+        const payload = { ...currentTrack, timestamp: trackStartTs, duration: dur };
+        sendScrobble(payload).catch(() => {});
+        chrome.storage.local.set({ currentScrobbled: true });
+      }
+    }
+
+    clearTimer();
+    currentTrack = { ...track };
+    scrobbled    = false;
+    trackStartTs = Math.floor(Date.now() / 1000);
+
+    // Persist for popup
+    chrome.storage.local.set({
+      currentTrack,
+      currentTrackAt: trackStartTs,
+      currentScrobbled: false,
+      isPlaying: true,
     });
 
+    // Notify background (popup display only — scrobbling is done here)
+    chrome.runtime.sendMessage({ type: 'NOW_PLAYING', track }).catch(() => {});
+
+    sendNowPlaying(track);
+    // Scrobble threshold is now detected via the 'timeupdate' event (wired in
+    // wire()) which Chrome does not throttle in background tabs, unlike setInterval.
+  }
+
+  function checkScrobble() {
+    if (scrobbled || !currentTrack || !audioEl || audioEl.paused) return;
+    const dur = audioEl.duration, pos = audioEl.currentTime;
+    if (!dur || !isFinite(dur) || dur < 30) return;
+    const threshold = Math.min(dur * 0.5, 240);
+    if (pos < threshold) return;
+
+    scrobbled = true;
+
+    const payload = { ...currentTrack, timestamp: trackStartTs, duration: dur };
+    const entry   = { track: payload, at: Date.now() };
+
+    chrome.storage.local.set({ currentScrobbled: true, lastScrobble: entry });
+
+    sendScrobble(payload).then(result => {
+      if (result?.error) {
+        chrome.storage.local.set({
+          lastScrobble: { ...entry, error: `Last.fm ${result.error}: ${result.message}` },
+        });
+      }
+    }).catch(() => {});
+  }
+
+  // ── Audio element wiring ──────────────────────────────────────────────────────
+
+  function wire(audio) {
+    // Combined handler for track changes AND scrobble threshold.
+    // timeupdate fires ~250 ms during playback and is NOT throttled in background
+    // tabs (unlike setInterval). By checking for metadata changes here we catch
+    // skips and natural song transitions even when loadstart doesn't fire (e.g.
+    // Amazon Music uses MSE / continuous streaming) and even when the tab is
+    // in the background.
     audio.addEventListener('timeupdate', () => {
       if (audio.paused) return;
       const track = getMetadata();
-      if (!track) return;
-      if (!isSameTrack(track, currentTrack)) {
-        onNewTrack(track);
-        return;
+      if (track && !same(track, currentTrack)) {
+        startTrack(track);
+      } else {
+        checkScrobble();
       }
-      checkScrobbleThreshold();
+    });
+
+    // loadstart = new audio source loading (skip or next song)
+    audio.addEventListener('loadstart', () => {
+      // Give Media Session 400 ms to update before reading metadata
+      setTimeout(() => {
+        const track = getMetadata();
+        if (!track) return;
+        if (!same(track, currentTrack)) {
+          startTrack(track);
+        } else if (currentTrack) {
+          // Same track reloaded (e.g. user clicked "previous" and landed on the
+          // same song, or the player seeked back to the start).  Reset scrobble
+          // state so this listen counts as a fresh play.
+          scrobbled    = false;
+          trackStartTs = Math.floor(Date.now() / 1000);
+          chrome.storage.local.set({ currentScrobbled: false, currentTrackAt: trackStartTs });
+        }
+      }, 400);
+    });
+
+    audio.addEventListener('play', () => {
+      const track = getMetadata();
+      if (!track) return;
+      chrome.storage.local.set({ isPlaying: true });
+      if (!same(track, currentTrack)) startTrack(track);
+      // No timer to restart — timeupdate handles threshold detection automatically.
+    });
+
+    audio.addEventListener('pause', () => {
+      chrome.storage.local.set({ isPlaying: false });
     });
 
     audio.addEventListener('ended', () => {
+      // Safety net: if timeupdate somehow missed the threshold, scrobble now.
+      if (currentTrack && !scrobbled && trackStartTs) {
+        const elapsed = Math.floor(Date.now() / 1000) - trackStartTs;
+        const dur = audio.duration || currentTrack.duration || 0;
+        const threshold = dur > 30 ? Math.min(dur * 0.5, 240) : 120;
+        if (elapsed >= threshold) {
+          const payload = { ...currentTrack, timestamp: trackStartTs, duration: dur };
+          const entry   = { track: payload, at: Date.now() };
+          chrome.storage.local.set({ currentScrobbled: true, lastScrobble: entry });
+          sendScrobble(payload).catch(() => {});
+        }
+      }
+      clearTimer();
       currentTrack = null;
-      scrobbled = false;
-      nowPlayingReported = false;
-      trackStartTimestamp = null;
+      scrobbled    = false;
+      chrome.storage.local.set({ isPlaying: false });
     });
   }
 
-  function findAndAttachAudio() {
+  // ── Player DOM observer ───────────────────────────────────────────────────────
+  // Watch #transport for attribute mutations on music-horizontal-item.
+  // Amazon Music sets primary-text/secondary-text when the track changes, so
+  // this fires immediately — no polling lag, works in background tabs.
+
+  let playerObserverAttached = false;
+  let playerObserverDebounce = null;
+
+  function observePlayer() {
+    if (playerObserverAttached) return;
+    const transport = document.querySelector('#transport');
+    if (!transport) return;
+    playerObserverAttached = true;
+
+    new MutationObserver(() => {
+      // Debounce: Amazon Music fires many mutations per track change
+      if (playerObserverDebounce) return;
+      playerObserverDebounce = setTimeout(() => {
+        playerObserverDebounce = null;
+        const track = getMetadata();
+        if (track && !same(track, currentTrack)) startTrack(track);
+      }, 200);
+    }).observe(transport, {
+      attributes: true,
+      // No attributeFilter — catch element replacement (childList) too
+      subtree: true,
+      childList: true,
+    });
+
+    // *** Critical: read state NOW — the attribute may already be set ***
+    // The observer only fires on future changes; without this, the currently
+    // playing track when the observer first attaches is never detected.
+    const track = getMetadata();
+    if (track && !same(track, currentTrack)) startTrack(track);
+  }
+
+  function findAudio() {
+    observePlayer(); // attach player observer as soon as #transport exists
     const audio = document.querySelector('audio');
     if (audio && audio !== audioEl) {
       audioEl = audio;
-      attachAudioListeners(audio);
+      wire(audio);
       if (!audio.paused) {
         const track = getMetadata();
-        if (track && !isSameTrack(track, currentTrack)) {
-          onNewTrack(track);
-        }
+        if (track && !same(track, currentTrack)) startTrack(track);
       }
     }
   }
 
-  // Watch for audio element being added dynamically
-  const domObserver = new MutationObserver(findAndAttachAudio);
-  domObserver.observe(document.documentElement, { childList: true, subtree: true });
+  new MutationObserver(findAudio).observe(document.documentElement, { childList: true, subtree: true });
 
-  // Poll every second as fallback — catches Media Session updates we might miss
+  // Polling fallback (2 s) — primarily to catch audio element replacement
+  // (Amazon Music occasionally swaps the <audio> node).  Track-change detection
+  // and scrobble checks are handled by the timeupdate listener above, which is
+  // not throttled in background tabs.  This interval IS throttled but that's
+  // fine — finding a new audio node is a rare, recoverable event.
   setInterval(() => {
-    findAndAttachAudio();
+    findAudio();
+    // Extra safety net: if timeupdate somehow missed a track change, catch it here.
     if (audioEl && !audioEl.paused) {
       const track = getMetadata();
-      if (track && !isSameTrack(track, currentTrack)) {
-        onNewTrack(track);
+      if (track && !same(track, currentTrack)) startTrack(track);
+    }
+  }, 2000);
+
+  findAudio();
+
+  // ── Keep background service worker alive ──────────────────────────────────────
+
+  function keepAlive() {
+    const port = chrome.runtime.connect({ name: 'keepalive' });
+    port.onDisconnect.addListener(() => setTimeout(keepAlive, 1000));
+  }
+  keepAlive();
+
+  // Ask background to run executeScript-based detection immediately on load,
+  // and again every 10 s as a fallback for anything the DOM observer missed.
+  // executeScript always works; this makes detection proactive not reactive.
+  function requestSync() {
+    chrome.runtime.sendMessage({ type: 'REQUEST_SYNC' }).catch(() => {});
+  }
+  requestSync();
+  setInterval(requestSync, 10000);
+
+  // ── Sync track state written by the background ───────────────────────────────
+  // background.js is woken by tabs.onUpdated (title change) when the user skips
+  // a track.  It reads the new track via executeScript / readAmazonTab() and
+  // writes it to chrome.storage.local.  We mirror that here so the in-memory
+  // currentTrack never stays stale — this is the key fix for the wrong-track
+  // scrobble: if timeupdate's own metadata detection missed the change, the
+  // storage listener will catch it within milliseconds of the background writing.
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+
+    if (changes.currentTrack) {
+      const newTrack = changes.currentTrack.newValue;
+      if (newTrack && !same(newTrack, currentTrack)) {
+        // Background detected a track we missed — adopt its state.
+        // Don't call startTrack() here: background already sent now-playing
+        // to Last.fm and set the alarm; just update in-memory state so
+        // checkScrobble uses the right track.
+        clearTimer();
+        currentTrack = { ...newTrack };
+        scrobbled    = false;
+        trackStartTs = changes.currentTrackAt?.newValue
+          ?? Math.floor(Date.now() / 1000);
       }
     }
-  }, 1000);
 
-  // Respond to popup's direct queries
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    // Mirror the scrobbled flag to prevent double-scrobbling.
+    // Background may scrobble via alarm; content script must not scrobble again.
+    if (changes.currentScrobbled?.newValue === true) {
+      scrobbled = true;
+    }
+  });
+
+  // ── Respond to popup queries ──────────────────────────────────────────────────
+
+  chrome.runtime.onMessage.addListener((msg, _, sendResponse) => {
     if (msg.type === 'GET_CURRENT_TRACK') {
       sendResponse({ track: currentTrack, isPlaying: audioEl ? !audioEl.paused : false });
     }
   });
-
-  findAndAttachAudio();
 })();
