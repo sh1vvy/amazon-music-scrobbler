@@ -203,8 +203,22 @@
     // skips and natural song transitions even when loadstart doesn't fire (e.g.
     // Amazon Music uses MSE / continuous streaming) and even when the tab is
     // in the background.
+    let lastPos = 0;
+
     audio.addEventListener('timeupdate', () => {
       if (audio.paused) return;
+      const pos = audio.currentTime;
+
+      // Detect repeat: position jumped back to near-zero while we already
+      // scrobbled this play. Amazon Music's "repeat one" mode often just seeks
+      // back to 0 without firing the ended event, so scrobbled stays true.
+      if (scrobbled && pos < 3 && lastPos > 10) {
+        scrobbled    = false;
+        trackStartTs = Math.floor(Date.now() / 1000) - Math.floor(pos);
+        chrome.storage.local.set({ currentScrobbled: false, currentTrackAt: trackStartTs });
+      }
+      lastPos = pos;
+
       const track = getMetadata();
       if (track && !same(track, currentTrack)) {
         startTrack(track);
