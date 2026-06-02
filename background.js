@@ -183,9 +183,11 @@ async function readAmazonTab() {
           artist = meta?.artist;
         }
         if (!title || !artist) return null;
+        // Strip Amazon explicit/clean/version tags so Last.fm matches the canonical track
+        const clean = s => s.replace(/\s*[\(\[](explicit|clean|explicit version|clean version|radio edit|radio version|album version|original mix)[\)\]]/gi, '').trim();
         return {
-          title,
-          artist,
+          title:  clean(title),
+          artist: clean(artist),
           album: '',
           duration: audio?.duration || 0,
           currentTime: audio?.currentTime || 0,
