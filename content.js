@@ -62,6 +62,13 @@
       ({ scrobblingEnabled }) => r(!!scrobblingEnabled)));
   }
 
+  // Cached threshold so checkScrobble (fires every timeupdate) isn't async.
+  // Refreshed via storage.onChanged whenever the user updates it.
+  let thresholdFraction = 0.5;
+  chrome.storage.sync.get({ scrobbleThresholdPercent: 50 }, ({ scrobbleThresholdPercent }) => {
+    thresholdFraction = (scrobbleThresholdPercent || 50) / 100;
+  });
+
   async function lastfmPost(method, extra = {}) {
     const { apiKey, apiSecret, sessionKey } = await getCreds();
     if (!apiKey || !apiSecret || !sessionKey) return null;
@@ -155,6 +162,15 @@
 
   function same(a, b) { return a && b && a.title === b.title && a.artist === b.artist; }
 
+  // Single source of truth for isPlaying writes — keeps the cache and storage
+  // in lockstep so the toolbar icon never gets stuck in the wrong state.
+  let __lastIsPlayingWritten = null;
+  function setIsPlaying(playing) {
+    if (__lastIsPlayingWritten === playing) return;
+    __lastIsPlayingWritten = playing;
+    chrome.storage.local.set({ isPlaying: playing });
+  }
+
   function clearTimer() {
     if (scrobbleTimer) { clearTimeout(scrobbleTimer); scrobbleTimer = null; }
   }
@@ -182,13 +198,13 @@
     const currentPos = Math.floor(audioEl?.currentTime || 0);
     trackStartTs = Math.floor(Date.now() / 1000) - currentPos;
 
-    // Persist for popup
+    // Persist for popup (isPlaying routed through setIsPlaying so its cache stays sync'd)
     chrome.storage.local.set({
       currentTrack,
       currentTrackAt: trackStartTs,
       currentScrobbled: false,
-      isPlaying: true,
     });
+    setIsPlaying(true);
 
     // Notify background (popup display only — scrobbling is done here)
     chrome.runtime.sendMessage({ type: 'NOW_PLAYING', track }).catch(() => {});
@@ -202,7 +218,7 @@
     if (scrobbled || !currentTrack || !audioEl || audioEl.paused) return;
     const dur = audioEl.duration, pos = audioEl.currentTime;
     if (!dur || !isFinite(dur) || dur < 30) return;
-    const threshold = Math.min(dur * 0.5, 240);
+    const threshold = Math.min(dur * thresholdFraction, 240);
     if (pos < threshold) return;
 
     scrobbled = true;
@@ -251,6 +267,9 @@
     let lastPos = 0;
 
     audio.addEventListener('timeupdate', () => {
+      // Heartbeat through setIsPlaying — keeps cache + storage in sync
+      setIsPlaying(!audio.paused);
+
       if (audio.paused) return;
       const pos = audio.currentTime;
 
@@ -292,15 +311,14 @@
     });
 
     audio.addEventListener('play', () => {
+      setIsPlaying(true);
       const track = getMetadata();
       if (!track) return;
-      chrome.storage.local.set({ isPlaying: true });
       if (!same(track, currentTrack)) startTrack(track);
-      // No timer to restart — timeupdate handles threshold detection automatically.
     });
 
     audio.addEventListener('pause', () => {
-      chrome.storage.local.set({ isPlaying: false });
+      setIsPlaying(false);
     });
 
     audio.addEventListener('ended', () => {
@@ -319,7 +337,7 @@
       clearTimer();
       currentTrack = null;
       scrobbled    = false;
-      chrome.storage.local.set({ isPlaying: false });
+      setIsPlaying(false);
     });
   }
 
@@ -413,6 +431,11 @@
   // storage listener will catch it within milliseconds of the background writing.
 
   chrome.storage.onChanged.addListener((changes, area) => {
+    // Sync area: settings changed — update cached threshold
+    if (area === 'sync' && changes.scrobbleThresholdPercent) {
+      const pct = changes.scrobbleThresholdPercent.newValue ?? 50;
+      thresholdFraction = (pct || 50) / 100;
+    }
     if (area !== 'local') return;
 
     if (changes.currentTrack) {

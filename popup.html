@@ -132,7 +132,7 @@
         <div class="setting-row">
           <div class="setting-label">
             <div class="setting-title">Scrobbling</div>
-            <div class="setting-desc">Send plays to Last.fm</div>
+            <div class="setting-desc">Send plays to Last.fm <kbd id="kbd-toggle" class="kbd"></kbd></div>
           </div>
           <label class="switch">
             <input type="checkbox" id="toggle-scrobble">
@@ -149,6 +149,17 @@
             <input type="checkbox" id="toggle-notifications">
             <span class="slider"></span>
           </label>
+        </div>
+
+        <div class="setting-row column">
+          <div class="setting-label slider-label">
+            <div>
+              <div class="setting-title">Scrobble threshold</div>
+              <div class="setting-desc">How much of a song must play before scrobbling</div>
+            </div>
+            <div class="slider-value" id="threshold-value">50%</div>
+          </div>
+          <input type="range" id="threshold-slider" class="range" min="20" max="90" step="5" value="50">
         </div>
 
         <div class="setting-row column">

@@ -72,9 +72,10 @@ function md5(input) {
 // Defaults: scrobbling on, notifications off, theme auto.
 
 const DEFAULT_SETTINGS = {
-  scrobblingEnabled:    true,
-  notificationsEnabled: false,
-  theme:                'auto', // 'auto' | 'dark' | 'light'
+  scrobblingEnabled:        true,
+  notificationsEnabled:     false,
+  theme:                    'auto', // 'auto' | 'dark' | 'light'
+  scrobbleThresholdPercent: 50,     // percent of track that must play before scrobbling
 };
 
 function getSettings() {
@@ -82,6 +83,101 @@ function getSettings() {
 }
 
 // ── Notifications ─────────────────────────────────────────────────────────────
+
+// ── Toolbar icon indicator ────────────────────────────────────────────────────
+// Chrome's badge is huge — it fills most of the icon and overpowers it.  Instead
+// we draw the base icon and a small play/check overlay directly into a canvas
+// and swap the toolbar icon via chrome.action.setIcon().  This gives us
+// pixel-level control: the indicator can be a small corner overlay, not a
+// dominant colored block.
+
+const ICON_SIZES   = [16, 32, 48, 128];
+const ICON_CACHE   = {};                       // state → {16:ImageData, 32, 48, 128}
+let   baseBitmap   = null;                     // cached base icon bitmap
+
+async function loadBaseBitmap() {
+  if (baseBitmap) return baseBitmap;
+  const blob = await fetch(chrome.runtime.getURL('icons/icon128.png')).then(r => r.blob());
+  baseBitmap = await createImageBitmap(blob);
+  return baseBitmap;
+}
+
+function drawCircle(ctx, x, y, r, fill) {
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = fill;
+  ctx.fill();
+}
+
+// Small corner indicator: thin dark ring + colored fill + white glyph.
+// Radius is ~20% of icon — visible but doesn't dominate.
+
+function drawCornerBadge(ctx, size, color, drawGlyph) {
+  const r  = size * 0.22;
+  const cx = size - r - size * 0.03;
+  const cy = size - r - size * 0.03;
+  // Thin dark outline for contrast against any icon background
+  drawCircle(ctx, cx, cy, r + Math.max(1, size * 0.02), 'rgba(0,0,0,0.55)');
+  drawCircle(ctx, cx, cy, r, color);
+  drawGlyph(cx, cy, r);
+}
+
+function drawCheckOverlay(ctx, size, color) {
+  drawCornerBadge(ctx, size, color, (cx, cy, r) => {
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth   = Math.max(1.2, size * 0.045);
+    ctx.lineCap     = 'round';
+    ctx.lineJoin    = 'round';
+    ctx.beginPath();
+    ctx.moveTo(cx - r * 0.45, cy + r * 0.05);
+    ctx.lineTo(cx - r * 0.10, cy + r * 0.40);
+    ctx.lineTo(cx + r * 0.50, cy - r * 0.30);
+    ctx.stroke();
+  });
+}
+
+async function generateIcon(state) {
+  if (ICON_CACHE[state]) return ICON_CACHE[state];
+  const base = await loadBaseBitmap();
+  const result = {};
+  for (const size of ICON_SIZES) {
+    const canvas = new OffscreenCanvas(size, size);
+    const ctx    = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(base, 0, 0, size, size);
+    if (state === 'scrobbled') drawCheckOverlay(ctx, size, '#34c759');
+    // else 'idle' → just the base icon, no overlay
+    result[size] = ctx.getImageData(0, 0, size, size);
+  }
+  ICON_CACHE[state] = result;
+  return result;
+}
+
+async function updateBadge() {
+  try {
+    const { currentScrobbled, currentTrack } =
+      await new Promise(r => chrome.storage.local.get(
+        ['currentScrobbled', 'currentTrack'], r));
+
+    // Only two states: scrobbled (green check) or idle (plain icon).
+    const state = (currentTrack && currentScrobbled) ? 'scrobbled' : 'idle';
+
+    const imageData = await generateIcon(state);
+    await chrome.action.setIcon({ imageData });
+    // Always clear badge text in case the old badge-based version left one behind
+    await chrome.action.setBadgeText({ text: '' });
+  } catch (e) {
+    console.warn('[Scrobbler] updateBadge failed:', e);
+  }
+}
+
+// Refresh icon when scrobble state changes (track change resets, scrobble flips it)
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && (changes.currentTrack || changes.currentScrobbled)) {
+    updateBadge();
+  }
+});
 
 async function notifyScrobbled(track) {
   const { notificationsEnabled } = await getSettings();
@@ -191,7 +287,11 @@ async function callScrobble(track) {
 
 async function readAmazonTab() {
   const tabs = await chrome.tabs.query({ url: AMAZON_MUSIC_PATTERNS });
-  if (!tabs.length) return null;
+  if (!tabs.length) {
+    // No Amazon Music tab — nothing is playing.  Make sure the badge reflects that.
+    chrome.storage.local.set({ isPlaying: false });
+    return null;
+  }
 
   try {
     const [res] = await chrome.scripting.executeScript({
@@ -228,7 +328,14 @@ async function readAmazonTab() {
         };
       },
     });
-    return res?.result || null;
+    const live = res?.result || null;
+    // Mirror isPlaying to storage so the toolbar badge always reflects real
+    // audio state.  Content script's own setIsPlaying writes can be unreliable
+    // (timing of play/pause events on Amazon Music's MSE stream), so this
+    // background path — which reads audio.paused directly via executeScript —
+    // is the canonical source of truth for the badge.
+    if (live) chrome.storage.local.set({ isPlaying: !!live.isPlaying });
+    return live;
   } catch (_) {
     return null;
   }
@@ -320,9 +427,10 @@ async function tryScrobbleNow() {
   const { sessionKey } = await getCredentials();
   if (!sessionKey) return;
 
-  // Honor the user's scrobble toggle
-  const { scrobblingEnabled } = await getSettings();
+  // Honor the user's scrobble toggle + threshold
+  const { scrobblingEnabled, scrobbleThresholdPercent } = await getSettings();
   if (!scrobblingEnabled) return;
+  const thresholdFraction = (scrobbleThresholdPercent || 50) / 100;
 
   const live = await readAmazonTab();
 
@@ -350,8 +458,8 @@ async function tryScrobbleNow() {
   // Last.fm rule: track must be longer than 30 seconds
   if (duration > 0 && duration < 30) return;
 
-  // Must have played to the scrobble threshold (50% or 4 min); 2 min if duration unknown
-  const threshold = duration > 30 ? Math.min(duration * 0.5, 240) : 120;
+  // Must have played to the user-configured threshold (default 50%, capped at 4 min)
+  const threshold = duration > 30 ? Math.min(duration * thresholdFraction, 240) : 120;
   if (position < threshold && elapsed < threshold) {
     if (!differentTrack) {
       // Still on the same track and too early — reschedule the alarm.
@@ -539,6 +647,27 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return { ok: true, settings: next };
       }
 
+      case 'RE_SCROBBLE': {
+        // User wants to resend a past scrobble (e.g. Last.fm didn't receive it)
+        const t = msg.track;
+        if (!t?.title || !t?.artist) return { ok: false, error: 'Missing track info' };
+        const payload = {
+          title:     t.title,
+          artist:    t.artist,
+          album:     t.album || '',
+          duration:  t.duration || 0,
+          timestamp: Math.floor(Date.now() / 1000), // new timestamp = now
+        };
+        try {
+          const result = await callScrobble(payload);
+          if (result?.error) return { ok: false, error: result.message };
+          await pushToHistory({ track: payload, at: Date.now(), manual: true });
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, error: e.message || 'Network error' };
+        }
+      }
+
       case 'LOVE_TRACK': {
         const result = await lastfmPost('track.love', { artist: msg.artist, track: msg.track });
         if (result?.error) return { ok: false, error: result.message };
@@ -693,6 +822,29 @@ syncTabState().catch(() => {});
 
 // Retry any scrobbles that were queued while offline
 flushOfflineQueue().catch(() => {});
+
+// Initial badge paint
+updateBadge();
+
+// ── Keyboard shortcut: toggle scrobbling ──────────────────────────────────────
+
+chrome.commands.onCommand.addListener(async (command) => {
+  if (command !== 'toggle-scrobbling') return;
+  const settings = await getSettings();
+  const next = !settings.scrobblingEnabled;
+  await new Promise(r => chrome.storage.sync.set({ scrobblingEnabled: next }, r));
+  updateBadge();
+  // Briefly notify so the user sees the new state even without opening the popup
+  try {
+    chrome.notifications.create('', {
+      type:    'basic',
+      iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+      title:   next ? 'Scrobbling on' : 'Scrobbling paused',
+      message: next ? 'Listening for plays.' : 'Plays will not be sent to Last.fm.',
+      silent:  true,
+    });
+  } catch (_) {}
+});
 
 // Repeating alarm: re-sync every 30 s (Chrome's minimum alarm period).
 // This ensures track detection catches up even if all other mechanisms fail.
