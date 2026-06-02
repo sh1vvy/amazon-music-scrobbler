@@ -106,15 +106,24 @@
       const title  = item.getAttribute('primary-text');
       const artist = item.getAttribute('secondary-text');
       if (title && artist) {
-        return { title, artist, album: '', duration: audioEl?.duration || 0 };
+        return { title: cleanStr(title), artist: cleanStr(artist), album: '', duration: audioEl?.duration || 0 };
       }
     }
     // Fallback: MediaSession API (covers edge cases / other Amazon Music layouts)
     const m = navigator.mediaSession?.metadata;
     if (m?.title && m?.artist) {
-      return { title: m.title, artist: m.artist, album: m.album || '', duration: audioEl?.duration || 0 };
+      return { title: cleanStr(m.title), artist: cleanStr(m.artist), album: m.album || '', duration: audioEl?.duration || 0 };
     }
     return null;
+  }
+
+  // Strip Amazon Music version/content tags that pollute Last.fm history.
+  // e.g. "Big Dawgs [Explicit]" → "Big Dawgs", "Song (Clean Version)" → "Song"
+  function cleanStr(str) {
+    if (!str) return str;
+    return str
+      .replace(/\s*[\(\[](explicit|clean|explicit version|clean version|radio edit|radio version|album version|original mix)[\)\]]/gi, '')
+      .trim();
   }
 
   function same(a, b) { return a && b && a.title === b.title && a.artist === b.artist; }
@@ -141,7 +150,10 @@
     clearTimer();
     currentTrack = { ...track };
     scrobbled    = false;
-    trackStartTs = Math.floor(Date.now() / 1000);
+    // Back-calculate the real start time using the audio position so the
+    // Last.fm timestamp is accurate even when detection was slightly delayed.
+    const currentPos = Math.floor(audioEl?.currentTime || 0);
+    trackStartTs = Math.floor(Date.now() / 1000) - currentPos;
 
     // Persist for popup
     chrome.storage.local.set({
