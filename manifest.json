@@ -8,7 +8,8 @@
     "identity",
     "tabs",
     "scripting",
-    "alarms"
+    "alarms",
+    "notifications"
   ],
   "host_permissions": [
     "https://music.amazon.com/*",
