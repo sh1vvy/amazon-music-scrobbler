@@ -56,6 +56,12 @@
     return new Promise(r => chrome.storage.sync.get(['apiKey','apiSecret','sessionKey'], r));
   }
 
+  // Read scrobble toggle (default true) — gates all scrobble sends from this script
+  async function isScrobblingEnabled() {
+    return new Promise(r => chrome.storage.sync.get({ scrobblingEnabled: true },
+      ({ scrobblingEnabled }) => r(!!scrobblingEnabled)));
+  }
+
   async function lastfmPost(method, extra = {}) {
     const { apiKey, apiSecret, sessionKey } = await getCreds();
     if (!apiKey || !apiSecret || !sessionKey) return null;
@@ -75,6 +81,15 @@
     const p = { artist: track.artist, track: track.title };
     if (track.album) p.album = track.album;
     lastfmPost('track.updateNowPlaying', p).catch(() => {});
+  }
+
+  function pushToHistory(entry) {
+    chrome.storage.local.get('scrobbleHistory', ({ scrobbleHistory = [] }) => {
+      const history = Array.isArray(scrobbleHistory) ? scrobbleHistory : [];
+      chrome.storage.local.set({
+        scrobbleHistory: [entry, ...history].slice(0, 5),
+      });
+    });
   }
 
   async function sendScrobble(track) {
@@ -106,13 +121,25 @@
       const title  = item.getAttribute('primary-text');
       const artist = item.getAttribute('secondary-text');
       if (title && artist) {
-        return { title: cleanStr(title), artist: cleanStr(artist), album: '', duration: audioEl?.duration || 0 };
+        return {
+          title:  cleanStr(title),
+          artist: cleanStr(artist),
+          album:  '',
+          image:  navigator.mediaSession?.metadata?.artwork?.[0]?.src || '',
+          duration: audioEl?.duration || 0,
+        };
       }
     }
     // Fallback: MediaSession API (covers edge cases / other Amazon Music layouts)
     const m = navigator.mediaSession?.metadata;
     if (m?.title && m?.artist) {
-      return { title: cleanStr(m.title), artist: cleanStr(m.artist), album: m.album || '', duration: audioEl?.duration || 0 };
+      return {
+        title:    cleanStr(m.title),
+        artist:   cleanStr(m.artist),
+        album:    m.album || '',
+        image:    m.artwork?.[0]?.src || '',
+        duration: audioEl?.duration || 0,
+      };
     }
     return null;
   }
@@ -171,7 +198,7 @@
     // wire()) which Chrome does not throttle in background tabs, unlike setInterval.
   }
 
-  function checkScrobble() {
+  async function checkScrobble() {
     if (scrobbled || !currentTrack || !audioEl || audioEl.paused) return;
     const dur = audioEl.duration, pos = audioEl.currentTime;
     if (!dur || !isFinite(dur) || dur < 30) return;
@@ -179,6 +206,10 @@
     if (pos < threshold) return;
 
     scrobbled = true;
+
+    // Respect the user's scrobble toggle.  We still mark scrobbled=true so we
+    // don't re-evaluate every timeupdate, but we don't actually call Last.fm.
+    if (!(await isScrobblingEnabled())) return;
 
     const payload = { ...currentTrack, timestamp: trackStartTs, duration: dur };
     const entry   = { track: payload, at: Date.now() };
@@ -190,8 +221,22 @@
         chrome.storage.local.set({
           lastScrobble: { ...entry, error: `Last.fm ${result.error}: ${result.message}` },
         });
+        // Network-y Last.fm errors → ask background to queue for retry
+        if (result.error === 16 || result.error === 11) {
+          try { chrome.runtime.sendMessage({ type: 'QUEUE_OFFLINE', track: payload }).catch(() => {}); } catch (_) {}
+        }
+      } else {
+        pushToHistory(entry);
+        // Ask background to flush any other queued scrobbles now that we're back online
+        try { chrome.runtime.sendMessage({ type: 'FLUSH_QUEUE' }).catch(() => {}); } catch (_) {}
       }
-    }).catch(() => {});
+    }).catch(() => {
+      // Network failure — ask background to queue
+      try { chrome.runtime.sendMessage({ type: 'QUEUE_OFFLINE', track: payload }).catch(() => {}); } catch (_) {}
+      chrome.storage.local.set({
+        lastScrobble: { ...entry, error: 'Network error — queued for retry' },
+      });
+    });
   }
 
   // ── Audio element wiring ──────────────────────────────────────────────────────
@@ -268,7 +313,7 @@
           const payload = { ...currentTrack, timestamp: trackStartTs, duration: dur };
           const entry   = { track: payload, at: Date.now() };
           chrome.storage.local.set({ currentScrobbled: true, lastScrobble: entry });
-          sendScrobble(payload).catch(() => {});
+          sendScrobble(payload).then(r => { if (!r?.error) pushToHistory(entry); }).catch(() => {});
         }
       }
       clearTimer();
@@ -345,22 +390,19 @@
 
   findAudio();
 
-  // ── Keep background service worker alive ──────────────────────────────────────
-
-  function keepAlive() {
-    const port = chrome.runtime.connect({ name: 'keepalive' });
-    port.onDisconnect.addListener(() => setTimeout(keepAlive, 1000));
+  // Returns false when the extension context has been invalidated (extension
+  // reloaded/updated). Used to stop background tasks on stale instances.
+  function contextAlive() {
+    try { return !!chrome.runtime.id; } catch (_) { return false; }
   }
-  keepAlive();
 
-  // Ask background to run executeScript-based detection immediately on load,
-  // and again every 10 s as a fallback for anything the DOM observer missed.
-  // executeScript always works; this makes detection proactive not reactive.
-  function requestSync() {
+  // Ask background to run executeScript-based detection on load.
+  // Periodic re-sync is handled by the background's track_poll alarm (every 30 s)
+  // so we don't need a setInterval here — that would throw on every tick after
+  // the extension is reloaded while the tab is still open.
+  try {
     chrome.runtime.sendMessage({ type: 'REQUEST_SYNC' }).catch(() => {});
-  }
-  requestSync();
-  setInterval(requestSync, 10000);
+  } catch (_) {}
 
   // ── Sync track state written by the background ───────────────────────────────
   // background.js is woken by tabs.onUpdated (title change) when the user skips

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <link rel="stylesheet" href="popup.css">
 </head>
-<body>
+<body data-theme="auto">
   <div id="app">
 
     <!-- Loading -->
@@ -15,10 +15,9 @@
     <!-- Setup: enter API credentials -->
     <div id="screen-setup" class="screen hidden">
       <div class="header">
-        <svg class="logo-icon" viewBox="0 0 40 40" fill="none">
-          <circle cx="20" cy="20" r="20" fill="#D51007"/>
-          <path d="M27 12v12.5c0 .8-.4 1.5-1 2l-3 1.5c-1.7.9-3.5-.3-3.5-2.3 0-1.4.9-2.6 2.2-3.1l2.3-.9V14.5L16 16v12.5c0 .8-.4 1.5-1 2l-3 1.5c-1.7.9-3.5-.3-3.5-2.3 0-1.4.9-2.6 2.2-3.1l2.3-.9V13a1 1 0 0 1 .7-1l12-3.5a1 1 0 0 1 1.3 1z" fill="white"/>
-        </svg>
+        <div class="logo">
+          <img src="icons/icon48.png" alt="" class="logo-img" />
+        </div>
         <div>
           <h1>Amazon Music<br>Scrobbler</h1>
         </div>
@@ -45,10 +44,9 @@
     <!-- Auth: connect Last.fm account -->
     <div id="screen-auth" class="screen hidden">
       <div class="header">
-        <svg class="logo-icon" viewBox="0 0 40 40" fill="none">
-          <circle cx="20" cy="20" r="20" fill="#D51007"/>
-          <path d="M27 12v12.5c0 .8-.4 1.5-1 2l-3 1.5c-1.7.9-3.5-.3-3.5-2.3 0-1.4.9-2.6 2.2-3.1l2.3-.9V14.5L16 16v12.5c0 .8-.4 1.5-1 2l-3 1.5c-1.7.9-3.5-.3-3.5-2.3 0-1.4.9-2.6 2.2-3.1l2.3-.9V13a1 1 0 0 1 .7-1l12-3.5a1 1 0 0 1 1.3 1z" fill="white"/>
-        </svg>
+        <div class="logo">
+          <img src="icons/icon48.png" alt="" class="logo-img" />
+        </div>
         <div>
           <h1>Connect Last.fm</h1>
         </div>
@@ -65,39 +63,114 @@
     <!-- Connected -->
     <div id="screen-connected" class="screen hidden">
       <div class="header compact">
-        <svg class="logo-icon small" viewBox="0 0 40 40" fill="none">
-          <circle cx="20" cy="20" r="20" fill="#D51007"/>
-          <path d="M27 12v12.5c0 .8-.4 1.5-1 2l-3 1.5c-1.7.9-3.5-.3-3.5-2.3 0-1.4.9-2.6 2.2-3.1l2.3-.9V14.5L16 16v12.5c0 .8-.4 1.5-1 2l-3 1.5c-1.7.9-3.5-.3-3.5-2.3 0-1.4.9-2.6 2.2-3.1l2.3-.9V13a1 1 0 0 1 .7-1l12-3.5a1 1 0 0 1 1.3 1z" fill="white"/>
-        </svg>
-        <div class="header-text">
-          <h1>Amazon Music Scrobbler</h1>
-          <span class="badge connected">Connected</span>
+        <div class="logo small">
+          <img src="icons/icon48.png" alt="" class="logo-img" />
         </div>
+        <div class="header-text">
+          <h1>Scrobbler</h1>
+          <div class="status-row">
+            <span class="badge" id="status-badge"><span class="dot"></span><span id="status-text">Active</span></span>
+            <span class="username-inline" id="username-display"></span>
+          </div>
+        </div>
+        <button id="btn-settings" class="icon-btn" title="Settings" aria-label="Settings">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
       </div>
 
       <div class="content">
-        <div class="username" id="username-display"></div>
-
         <div class="track-card" id="now-playing-card">
           <div class="card-label">
             <span class="dot playing"></span>
             Now Playing
           </div>
-          <div id="now-playing-content" class="track-info">
-            <span class="track-empty">Nothing playing</span>
+          <div class="now-playing-row">
+            <img id="now-playing-art" class="album-art hidden" alt="Album art" />
+            <div class="album-art-placeholder hidden" id="album-art-placeholder">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
+              </svg>
+            </div>
+            <div id="now-playing-content" class="track-info">
+              <span class="track-empty">Nothing playing</span>
+            </div>
+            <button id="btn-love" class="btn-love" title="Love on Last.fm" disabled>
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 21s-7-4.5-7-11a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 6.5-7 11-7 11z"/></svg>
+            </button>
           </div>
         </div>
 
-        <div class="track-card" id="last-scrobble-card">
-          <div class="card-label">Last Scrobbled</div>
-          <div id="last-scrobble-content" class="track-info">
+        <div class="history-section">
+          <div class="card-label">
+            Recent Scrobbles
+            <span id="queue-indicator" class="queue-badge hidden" title="Scrobbles queued (offline)">0 queued</span>
+          </div>
+          <div id="history-list">
             <span class="track-empty">Nothing scrobbled yet</span>
           </div>
         </div>
+      </div>
+    </div>
 
-        <div class="actions">
-          <button id="btn-disconnect" class="btn ghost small">Disconnect</button>
+    <!-- Settings -->
+    <div id="screen-settings" class="screen hidden">
+      <div class="header compact">
+        <button id="btn-back" class="icon-btn" title="Back" aria-label="Back">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 12H5"/><path d="m12 19-7-7 7-7"/>
+          </svg>
+        </button>
+        <div class="header-text">
+          <h1>Settings</h1>
         </div>
+      </div>
+
+      <div class="content">
+        <div class="setting-row">
+          <div class="setting-label">
+            <div class="setting-title">Scrobbling</div>
+            <div class="setting-desc">Send plays to Last.fm</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="toggle-scrobble">
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-label">
+            <div class="setting-title">Notifications</div>
+            <div class="setting-desc">Toast on every scrobble</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="toggle-notifications">
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="setting-row column">
+          <div class="setting-label">
+            <div class="setting-title">Theme</div>
+            <div class="setting-desc">Match system, or pick one</div>
+          </div>
+          <div class="seg-control" id="theme-seg">
+            <button data-value="auto" class="seg-btn">Auto</button>
+            <button data-value="light" class="seg-btn">Light</button>
+            <button data-value="dark" class="seg-btn">Dark</button>
+          </div>
+        </div>
+
+        <a href="#" id="link-profile" target="_blank" class="link-row hidden">
+          <span>View Last.fm profile</span>
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M7 17 17 7"/><path d="M7 7h10v10"/>
+          </svg>
+        </a>
+
+        <button id="btn-disconnect" class="btn ghost">Disconnect</button>
       </div>
     </div>
 

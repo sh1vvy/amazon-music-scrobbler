@@ -67,6 +67,36 @@ function md5(input) {
     .join('');
 }
 
+// ── Settings ──────────────────────────────────────────────────────────────────
+// Stored in chrome.storage.sync so they roam across devices.
+// Defaults: scrobbling on, notifications off, theme auto.
+
+const DEFAULT_SETTINGS = {
+  scrobblingEnabled:    true,
+  notificationsEnabled: false,
+  theme:                'auto', // 'auto' | 'dark' | 'light'
+};
+
+function getSettings() {
+  return new Promise(r => chrome.storage.sync.get(DEFAULT_SETTINGS, r));
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+async function notifyScrobbled(track) {
+  const { notificationsEnabled } = await getSettings();
+  if (!notificationsEnabled) return;
+  try {
+    chrome.notifications.create('', {
+      type: 'basic',
+      iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+      title: 'Scrobbled to Last.fm',
+      message: `${track.title} — ${track.artist}`,
+      silent: true,
+    });
+  } catch (_) {}
+}
+
 // ── Credentials ───────────────────────────────────────────────────────────────
 
 function getCredentials() {
@@ -185,10 +215,13 @@ async function readAmazonTab() {
         if (!title || !artist) return null;
         // Strip Amazon explicit/clean/version tags so Last.fm matches the canonical track
         const clean = s => s.replace(/\s*[\(\[](explicit|clean|explicit version|clean version|radio edit|radio version|album version|original mix)[\)\]]/gi, '').trim();
+        // Album art lives in navigator.mediaSession.metadata.artwork (512px JPEG)
+        const image = navigator.mediaSession?.metadata?.artwork?.[0]?.src || '';
         return {
           title:  clean(title),
           artist: clean(artist),
-          album: '',
+          album:  '',
+          image,
           duration: audio?.duration || 0,
           currentTime: audio?.currentTime || 0,
           isPlaying: audio ? !audio.paused : false,
@@ -206,10 +239,56 @@ async function readAmazonTab() {
 function getLocalState() {
   return new Promise(r =>
     chrome.storage.local.get(
-      ['currentTrack', 'currentTrackAt', 'currentScrobbled', 'lastScrobble'],
+      ['currentTrack', 'currentTrackAt', 'currentScrobbled', 'lastScrobble', 'scrobbleHistory'],
       r
     )
   );
+}
+
+async function pushToHistory(entry) {
+  const state = await new Promise(r => chrome.storage.local.get('scrobbleHistory', r));
+  const history = Array.isArray(state.scrobbleHistory) ? state.scrobbleHistory : [];
+  await new Promise(r => chrome.storage.local.set({
+    scrobbleHistory: [entry, ...history].slice(0, 5),
+  }, r));
+}
+
+// ── Offline queue ─────────────────────────────────────────────────────────────
+// When a scrobble fails (network down, Last.fm API unreachable), we stash the
+// payload here and retry on each subsequent successful scrobble + every track_poll.
+
+async function queueOfflineScrobble(track) {
+  const { offlineQueue = [] } = await new Promise(r => chrome.storage.local.get('offlineQueue', r));
+  // Avoid duplicates by (title, artist, timestamp)
+  const exists = offlineQueue.some(t =>
+    t.title === track.title && t.artist === track.artist && t.timestamp === track.timestamp);
+  if (exists) return;
+  await new Promise(r => chrome.storage.local.set({
+    offlineQueue: [...offlineQueue, track].slice(-50), // cap at 50 to avoid storage bloat
+  }, r));
+}
+
+async function flushOfflineQueue() {
+  const { offlineQueue = [] } = await new Promise(r => chrome.storage.local.get('offlineQueue', r));
+  if (offlineQueue.length === 0) return;
+
+  const { sessionKey } = await getCredentials();
+  if (!sessionKey) return;
+
+  const remaining = [];
+  for (const track of offlineQueue) {
+    try {
+      const result = await callScrobble(track);
+      if (result?.error) {
+        remaining.push(track); // keep for next try
+      } else {
+        await pushToHistory({ track, at: Date.now(), recovered: true });
+      }
+    } catch (_) {
+      remaining.push(track); // network still down
+    }
+  }
+  await new Promise(r => chrome.storage.local.set({ offlineQueue: remaining }, r));
 }
 
 async function onNewTrack(track) {
@@ -240,6 +319,10 @@ async function tryScrobbleNow() {
 
   const { sessionKey } = await getCredentials();
   if (!sessionKey) return;
+
+  // Honor the user's scrobble toggle
+  const { scrobblingEnabled } = await getSettings();
+  if (!scrobblingEnabled) return;
 
   const live = await readAmazonTab();
 
@@ -286,18 +369,30 @@ async function tryScrobbleNow() {
     lastScrobble: scrobbleEntry,
   }, r));
 
+  const scrobbleTrack = { ...state.currentTrack, timestamp: state.currentTrackAt };
   try {
-    const result = await callScrobble({ ...state.currentTrack, timestamp: state.currentTrackAt });
+    const result = await callScrobble(scrobbleTrack);
     if (result?.error) {
       console.error('[Scrobbler] Last.fm error:', result.error, result.message);
+      // 16 = service offline, 11 = service temporarily unavailable → queue
+      if (result.error === 16 || result.error === 11) {
+        await queueOfflineScrobble(scrobbleTrack);
+      }
       await new Promise(r => chrome.storage.local.set({
         lastScrobble: { ...scrobbleEntry, error: `Last.fm ${result.error}: ${result.message}` },
       }, r));
+    } else {
+      await pushToHistory(scrobbleEntry);
+      await notifyScrobbled(scrobbleEntry.track);
+      // Successful scrobble — opportunistically flush any queued ones
+      flushOfflineQueue().catch(() => {});
     }
   } catch (e) {
+    // Network error / fetch threw — queue for retry
     console.error('[Scrobbler] Scrobble failed:', e);
+    await queueOfflineScrobble(scrobbleTrack);
     await new Promise(r => chrome.storage.local.set({
-      lastScrobble: { ...scrobbleEntry, error: e.message },
+      lastScrobble: { ...scrobbleEntry, error: 'Network error — queued for retry' },
     }, r));
   }
 }
@@ -352,30 +447,17 @@ async function syncTabState() {
   }
 }
 
-// ── Keep-alive port (from content script) ────────────────────────────────────
-// Each time the content script (re)connects we also sync tab state.
-// This fires on page load AND every time the service worker restarts and the
-// content script reconnects — giving us a sync on every worker wake.
-
-let lastKeepaliveSyncTs = 0;
-
-chrome.runtime.onConnect.addListener(port => {
-  if (port.name !== 'keepalive') return;
-  port.onDisconnect.addListener(() => {});
-
-  // Throttle: don't sync more than once per 8 s (reconnects can be rapid)
-  const now = Date.now();
-  if (now - lastKeepaliveSyncTs > 8000) {
-    lastKeepaliveSyncTs = now;
-    syncTabState().catch(() => {});
-  }
-});
+// Note: keepAlive port removed from content script — the REQUEST_SYNC heartbeat
+// (sendMessage every 10 s) wakes the service worker and is sufficient.
 
 // ── Alarms ────────────────────────────────────────────────────────────────────
 
 chrome.alarms.onAlarm.addListener(async alarm => {
   if (alarm.name === 'scrobble_pending') await tryScrobbleNow();
-  if (alarm.name === 'track_poll')       await syncTabState();
+  if (alarm.name === 'track_poll') {
+    await syncTabState();
+    await flushOfflineQueue(); // periodic retry
+  }
 });
 
 // ── Tab events → sync state ───────────────────────────────────────────────────
@@ -436,6 +518,36 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const state = await getLocalState();
         if (state.currentScrobbled) return { ok: true };
         await tryScrobbleNow();
+        return { ok: true };
+      }
+
+      case 'QUEUE_OFFLINE':
+        if (msg.track) await queueOfflineScrobble(msg.track);
+        return { ok: true };
+
+      case 'FLUSH_QUEUE':
+        flushOfflineQueue().catch(() => {});
+        return { ok: true };
+
+      case 'GET_SETTINGS':
+        return { ok: true, settings: await getSettings() };
+
+      case 'UPDATE_SETTINGS': {
+        const current = await getSettings();
+        const next = { ...current, ...(msg.settings || {}) };
+        await new Promise(r => chrome.storage.sync.set(next, r));
+        return { ok: true, settings: next };
+      }
+
+      case 'LOVE_TRACK': {
+        const result = await lastfmPost('track.love', { artist: msg.artist, track: msg.track });
+        if (result?.error) return { ok: false, error: result.message };
+        return { ok: true };
+      }
+
+      case 'UNLOVE_TRACK': {
+        const result = await lastfmPost('track.unlove', { artist: msg.artist, track: msg.track });
+        if (result?.error) return { ok: false, error: result.message };
         return { ok: true };
       }
 
@@ -509,6 +621,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
 
         const freshState = await getLocalState();
+        const settings = await getSettings();
+        const { offlineQueue = [] } = await new Promise(r =>
+          chrome.storage.local.get('offlineQueue', r));
         return {
           ok: true,
           hasCredentials: !!(creds.apiKey && creds.apiSecret),
@@ -516,6 +631,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           username: creds.username || null,
           liveTrack: liveTrack || null,
           lastScrobble: freshState.lastScrobble || null,
+          scrobbleHistory: freshState.scrobbleHistory || [],
+          settings,
+          offlineQueueSize: offlineQueue.length,
         };
       }
 
@@ -572,6 +690,9 @@ recoverMissedScrobble();
 // Sync current tab state on every service worker startup.
 // This catches the case where the worker was killed mid-song.
 syncTabState().catch(() => {});
+
+// Retry any scrobbles that were queued while offline
+flushOfflineQueue().catch(() => {});
 
 // Repeating alarm: re-sync every 30 s (Chrome's minimum alarm period).
 // This ensures track detection catches up even if all other mechanisms fail.
